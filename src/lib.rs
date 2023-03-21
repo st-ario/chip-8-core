@@ -1,8 +1,10 @@
-const RAM_SIZE: usize = 0xFFF - 0x200; // 0x000 to 0x1FF are reserved for the interpreter
-const SCREEN_WIDTH: usize = 64;
-const SCREEN_HEIGHT: usize = 32;
+mod framebuffer;
+pub use framebuffer::FrameBuffer;
+use framebuffer::*;
 
-pub type FrameBuffer = [[u8; SCREEN_WIDTH / 8]; SCREEN_HEIGHT];
+const RAM_SIZE: usize = 0xFFF - 0x200; // 0x000 to 0x1FF are reserved for the interpreter
+pub const SCREEN_WIDTH: usize = 64;
+pub const SCREEN_HEIGHT: usize = 32;
 
 /* utility functions to process opcodes */
 #[inline(always)]
@@ -43,12 +45,12 @@ const DIGITS_SPRITES: [u8; 80] = [
 ];
 
 pub struct Chip8 {
-    framebuffer: FrameBuffer, // SCREEN_WIDTH x SCREEN_HEIGHT on/off pixel
-    reg: [u8; 18],            // general purpose registers
-    reg_vi: u16,              // 16-bit register, used to store memory addresses
-    program_counter: u16,     // pseudo-register "pc"
-    stack_pointer: u8,        // pseudo-register "sp"
-    call_stack: [u16; 16],    // 16 levels of nested subroutines, panic on stack overflow
+    framebuffer: FrameBufferInternal, // SCREEN_WIDTH x SCREEN_HEIGHT on/off pixel
+    reg: [u8; 18],                    // general purpose registers
+    reg_vi: u16,                      // 16-bit register, used to store memory addresses
+    program_counter: u16,             // pseudo-register "pc"
+    stack_pointer: u8,                // pseudo-register "sp"
+    call_stack: [u16; 16],            // 16 levels of nested subroutines, panic on stack overflow
     ram: [u8; RAM_SIZE],
     sound_setter: fn(u8) -> (),          // set sound timer register
     time_setter: fn(u8) -> (),           // set delay timer register
@@ -71,7 +73,7 @@ impl Chip8 {
         rng: fn() -> u8,
     ) -> Chip8 {
         let mut res = Chip8 {
-            framebuffer: [[0; 8]; 32],
+            framebuffer: FrameBufferInternal::default(),
             reg: [0; 18],
             reg_vi: 0,
             call_stack: [0; 16],
@@ -172,8 +174,8 @@ impl Chip8 {
 
     fn cls(&mut self) {
         /* 0x00E0 - Clear screen */
-        self.framebuffer = [[0; 8]; 32];
-        (self.draw_screen)(&self.framebuffer);
+        self.framebuffer = FrameBufferInternal::default();
+        (self.draw_screen)(self.framebuffer.as_ref());
     }
 
     fn ret(&mut self) {
@@ -345,22 +347,22 @@ impl Chip8 {
             // check whether something will be turned off
             // pixels will turn off if and only if they are a 1 and they will be XORed with a 1
             let flipped_left =
-                self.framebuffer[first_influenced_byte][current_row] & left_chunk != 0;
+                self.framebuffer.data[first_influenced_byte][current_row] & left_chunk != 0;
             let flipped_right =
-                self.framebuffer[first_influenced_byte + 1][current_row] & right_chunk != 0;
+                self.framebuffer.data[first_influenced_byte + 1][current_row] & right_chunk != 0;
 
             self.reg[0xF] = (flipped_left | flipped_right) as u8;
 
             // update framebuffer
-            self.framebuffer[first_influenced_byte][current_row] ^= left_chunk;
-            self.framebuffer[first_influenced_byte + 1][current_row] ^= right_chunk;
+            self.framebuffer.data[first_influenced_byte][current_row] ^= left_chunk;
+            self.framebuffer.data[first_influenced_byte + 1][current_row] ^= right_chunk;
 
             current_row += 1;
             sprite_row += 1;
         }
 
         // send draw signal
-        (self.draw_screen)(&self.framebuffer);
+        (self.draw_screen)(self.framebuffer.as_ref());
     }
 
     fn skp(&mut self, vx: usize) {
