@@ -3,3 +3,6 @@ authors = ["Stefano Ariotta sqrtstefano@gmail.com"]
 name = "chip-8-core"
 version = "0.1.0"
 edition = "2021"
+
+[features]
+legacy-opcodes = []

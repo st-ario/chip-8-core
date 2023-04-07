@@ -2,7 +2,7 @@ mod framebuffer;
 pub use framebuffer::FrameBuffer;
 use framebuffer::*;
 
-const RAM_SIZE: usize = 0xFFF - 0x200; // 0x000 to 0x1FF are reserved for the interpreter
+const RAM_SIZE: usize = 0xFFF;
 pub const SCREEN_WIDTH: usize = 64;
 pub const SCREEN_HEIGHT: usize = 32;
 
@@ -24,7 +24,7 @@ const fn mask_y(instr: u16) -> usize {
     ((instr & 0xF0) >> 4) as usize
 }
 
-/* stored at the beginning of the interpreter area: 0x000 to 0x1FF */
+/* stored in RAM at the beginning of the interpreter area: 0x000 to 0x1FF */
 const DIGITS_SPRITES: [u8; 80] = [
     0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
     0x20, 0x60, 0x20, 0x20, 0x70, // 1
@@ -44,37 +44,39 @@ const DIGITS_SPRITES: [u8; 80] = [
     0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
-pub struct Chip8 {
+const DIGIT_SPRITE_SIZE: u8 = 5;
+
+pub struct Chip8<'a> {
     framebuffer: FrameBufferInternal, // SCREEN_WIDTH x SCREEN_HEIGHT on/off pixel
-    reg: [u8; 18],                    // general purpose registers
+    reg: [u8; 16],                    // general purpose registers
     reg_vi: u16,                      // 16-bit register, used to store memory addresses
     program_counter: u16,             // pseudo-register "pc"
     stack_pointer: u8,                // pseudo-register "sp"
     call_stack: [u16; 16],            // 16 levels of nested subroutines, panic on stack overflow
     ram: [u8; RAM_SIZE],
-    sound_setter: fn(u8) -> (),          // set sound timer register
-    time_setter: fn(u8) -> (),           // set delay timer register
-    time_getter: fn() -> u8,             // get value of delay timer register
-    draw_screen: fn(&FrameBuffer) -> (), // handle draw calls
-    is_pressed: fn(u8) -> bool,          // check the key corresponding to the argument
-    wait_for_key: fn() -> u8, // suspend execution until a key is pressed, return key value
-    rng: fn() -> u8,          // generate random number
+    sound_setter: &'a (dyn Fn(u8)),    // set sound timer register
+    time_setter: &'a (dyn Fn(u8)),     // set delay timer register
+    time_getter: &'a (dyn Fn() -> u8), // get value of delay timer register
+    draw_screen: &'a (dyn Fn(&FrameBuffer)), // handle draw calls
+    is_pressed: &'a (dyn Fn(u8) -> bool), // check the key corresponding to the argument
+    wait_for_key: &'a (dyn Fn() -> u8), // suspend execution until a key is pressed, return key value
+    rng: &'a (dyn Fn() -> u8),          // generate random number
 }
 
-impl Chip8 {
+impl<'a> Chip8<'a> {
     pub fn new(
         program: &[u8],
-        sound_setter: fn(u8) -> (),
-        time_setter: fn(u8) -> (),
-        time_getter: fn() -> u8,
-        draw_screen: fn(&FrameBuffer) -> (),
-        is_pressed: fn(u8) -> bool,
-        wait_for_key: fn() -> u8,
-        rng: fn() -> u8,
-    ) -> Chip8 {
+        sound_setter: &'a (dyn Fn(u8)),
+        time_setter: &'a (dyn Fn(u8)),
+        time_getter: &'a (dyn Fn() -> u8),
+        draw_screen: &'a (dyn Fn(&FrameBuffer)),
+        is_pressed: &'a (dyn Fn(u8) -> bool),
+        wait_for_key: &'a (dyn Fn() -> u8),
+        rng: &'a (dyn Fn() -> u8),
+    ) -> Chip8<'a> {
         let mut res = Chip8 {
             framebuffer: FrameBufferInternal::default(),
-            reg: [0; 18],
+            reg: [0; 16],
             reg_vi: 0,
             call_stack: [0; 16],
             program_counter: 0,
@@ -96,24 +98,25 @@ impl Chip8 {
         res.ram[0x200..0x200 + program.len()].copy_from_slice(program);
         res.program_counter = 0x200;
 
-        return res;
+        res
     }
 
-    pub fn run(&mut self) -> ! {
-        loop {
-            let counter = self.program_counter as usize;
-            let p_instr = &self.ram[counter] as *const u8 as *const u16;
-            let instr;
-            unsafe {
-                instr = *p_instr;
-            }
-            self.parse_instruction(instr);
-            self.program_counter += 2;
-        }
+    const INSTRUCTION_SIZE: u16 = std::mem::size_of::<u16>() as u16;
+
+    pub fn execute_next_instruction(&mut self) {
+        let instr_begin = self.program_counter as usize;
+        let instr_end = instr_begin + Chip8::INSTRUCTION_SIZE as usize;
+
+        let instr = u16::from_be_bytes(self.ram[instr_begin..instr_end].try_into().unwrap());
+
+        self.parse_instruction(instr);
+        // Each instruction takes care of suitably incrementing the program counter
+        // if the program counter overflows RAM, then the program is not well formed
+        // and the application panics
     }
 
     fn parse_instruction(&mut self, instr: u16) {
-        match (instr & 0xF000) >> 4 {
+        match instr >> 12 {
             0x0 => match instr & 0x0FF {
                 0xE0 => self.cls(),
                 0xEE => self.ret(),
@@ -123,10 +126,11 @@ impl Chip8 {
             0x2 => self.call(instr & 0xFFF),
             0x3 => self.se(mask_x(instr), mask_8(instr)),
             0x4 => self.sne(mask_x(instr), mask_8(instr)),
-            0x5 => match instr & 0x00F {
-                0 => self.sevv(mask_x(instr), mask_y(instr)),
-                _ => (),
-            },
+            0x5 => {
+                if instr & 0x00F == 0 {
+                    self.sevv(mask_x(instr), mask_y(instr))
+                }
+            }
             0x6 => self.mov(mask_x(instr), mask_8(instr)),
             0x7 => self.add(mask_x(instr), mask_8(instr)),
             0x8 => match instr & 0x00F {
@@ -141,10 +145,11 @@ impl Chip8 {
                 0xE => self.shl(mask_x(instr), mask_y(instr)),
                 _ => (),
             },
-            0x9 => match instr & 0x00F {
-                0 => self.snev(mask_x(instr), mask_y(instr)),
-                _ => (),
-            },
+            0x9 => {
+                if instr & 0x00F == 0 {
+                    self.snev(mask_x(instr), mask_y(instr))
+                }
+            }
             0xA => self.movi(instr & 0xFFF),
             0xB => self.jmpv(instr & 0xFFF),
             0xC => self.rnd(mask_x(instr), mask_8(instr)),
@@ -176,12 +181,13 @@ impl Chip8 {
         /* 0x00E0 - Clear screen */
         self.framebuffer = FrameBufferInternal::default();
         (self.draw_screen)(self.framebuffer.as_ref());
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn ret(&mut self) {
         /* 0x00EE - Return from a subroutine */
-        self.program_counter = self.call_stack[self.stack_pointer as usize];
         self.stack_pointer -= 1;
+        self.program_counter = self.call_stack[self.stack_pointer as usize];
     }
 
     fn jmp(&mut self, addr: u16) {
@@ -191,60 +197,75 @@ impl Chip8 {
 
     fn call(&mut self, addr: u16) {
         /* 0x2NNN - Call subroutine */
+
+        // save the instruction to be executed _after_ return
+        self.call_stack[self.stack_pointer as usize] =
+            self.program_counter + Chip8::INSTRUCTION_SIZE;
         self.stack_pointer += 1;
-        self.call_stack[self.stack_pointer as usize] = self.program_counter;
         self.program_counter = addr;
     }
 
     fn se(&mut self, vx: usize, val: u8) {
         /* 0x3XNN - Skip next instruction if [VX] equal NN */
-        if self.reg[vx] == val {
-            self.program_counter += 2;
-        }
+        self.program_counter += if self.reg[vx] == val {
+            2 * Chip8::INSTRUCTION_SIZE
+        } else {
+            Chip8::INSTRUCTION_SIZE
+        };
     }
 
     fn sne(&mut self, vx: usize, val: u8) {
         /* 0x4XNN - skip next instruction if [VX] not equal NN */
-        if self.reg[vx] != val {
-            self.program_counter += 2;
-        }
+        self.program_counter += if self.reg[vx] != val {
+            2 * Chip8::INSTRUCTION_SIZE
+        } else {
+            Chip8::INSTRUCTION_SIZE
+        };
     }
 
     fn sevv(&mut self, vx: usize, vy: usize) {
         /* 5XY0 - Skip next instruction if [VX] equal [VY] */
-        if self.reg[vx] == self.reg[vy] {
-            self.program_counter += 2;
-        }
+        self.program_counter += if self.reg[vx] == self.reg[vy] {
+            2 * Chip8::INSTRUCTION_SIZE
+        } else {
+            Chip8::INSTRUCTION_SIZE
+        };
     }
 
     fn mov(&mut self, vx: usize, val: u8) {
         /* 6XNN - Store */
         self.reg[vx] = val;
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn add(&mut self, vx: usize, val: u8) {
         /* 7XNN - Add */
-        self.reg[vx] += val;
+        self.reg[vx] = self.reg[vx].wrapping_add(val);
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn movv(&mut self, vx: usize, vy: usize) {
         /* 8XY0 - Store [VY] in VX */
         self.reg[vx] = self.reg[vy];
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn or(&mut self, vx: usize, vy: usize) {
         /* 8XY1 - Store [VX] OR [VY] in VX */
         self.reg[vx] |= self.reg[vy];
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn and(&mut self, vx: usize, vy: usize) {
         /* 8XY2 - Store [VX] AND [VY] in VX */
         self.reg[vx] &= self.reg[vy];
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn xor(&mut self, vx: usize, vy: usize) {
         /* 8XY3 - Store [VX] XOR [VY] in VX */
         self.reg[vx] ^= self.reg[vy];
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn addv(&mut self, vx: usize, vy: usize) {
@@ -252,12 +273,14 @@ impl Chip8 {
         let res = self.reg[vx].overflowing_add(self.reg[vy]);
         self.reg[vx] = res.0;
         self.reg[0xF] = res.1 as u8;
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn sub(&mut self, vx: usize, vy: usize) {
         /* 8XY5 - Store [VX] - [VY] in VX, set VF = NOT borrow as bool */
         self.reg[0xF] = (self.reg[vx] > self.reg[vy]) as u8;
         self.reg[vx] = self.reg[vx].wrapping_sub(self.reg[vy]);
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     #[cfg(feature = "legacy-opcodes")]
@@ -265,6 +288,7 @@ impl Chip8 {
         /* 8XY6 - Set VX as [VY] >> 1, set VF = least-significant bit before shift */
         self.reg[0xF] = self.reg[vy] & 0x1;
         self.reg[vx] = self.reg[vy] >> 1;
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     #[cfg(not(feature = "legacy-opcodes"))]
@@ -272,12 +296,14 @@ impl Chip8 {
         /* 8XY6 - Set VX as [VX] >> 1, set VF = least-significant bit before shift */
         self.reg[0xF] = self.reg[vx] & 0x1;
         self.reg[vx] >>= 1;
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn subn(&mut self, vx: usize, vy: usize) {
         /* 8XY7 - Store [VY] - [VX] in VX, set VF = NOT borrow */
         self.reg[0xF] = (self.reg[vy] > self.reg[vx]) as u8;
         self.reg[vx] = self.reg[vy].wrapping_sub(self.reg[vx]);
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     #[cfg(feature = "legacy-opcodes")]
@@ -285,6 +311,7 @@ impl Chip8 {
         /* 8XYE - Set VX as [VY] << 1, set VF = most-significant bit before shift */
         self.reg[0xF] = self.reg[vy] & 0b1000_0000;
         self.reg[vx] = self.reg[vy] << 1;
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     #[cfg(not(feature = "legacy-opcodes"))]
@@ -292,28 +319,34 @@ impl Chip8 {
         /* 8XYE - Set VX as [VX] << 1, set VF = most-significant bit before shift */
         self.reg[0xF] = self.reg[vx] & 0b1000_0000;
         self.reg[vx] <<= 1;
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn snev(&mut self, vx: usize, vy: usize) {
         /* 9XY0 - Skip next instruction if [VX] != [VY] */
-        if self.reg[vx] != self.reg[vy] {
-            self.program_counter += 2;
-        }
+        self.program_counter += if self.reg[vx] != self.reg[vy] {
+            2 * Chip8::INSTRUCTION_SIZE
+        } else {
+            Chip8::INSTRUCTION_SIZE
+        };
     }
 
     fn movi(&mut self, addr: u16) {
         /* ANNN - Store NNN in VI */
-        self.reg_vi = addr;
+        self.reg_vi = u16::to_be(addr);
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn jmpv(&mut self, addr: u16) {
         /* BNNN - Jump to address NNN + V0, panic if out of RAM bounds */
-        self.program_counter = addr + self.reg[0x0] as u16;
+        let dest = addr + self.reg[0x0] as u16;
+        self.program_counter = dest;
     }
 
     fn rnd(&mut self, vx: usize, val: u8) {
         /* CXNN - Set VX to random byte AND val */
         self.reg[vx] = (self.rng)() & val;
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn display(&mut self, vx: usize, vy: usize, val: u8) {
@@ -323,11 +356,12 @@ impl Chip8 {
          * Sprites are always 8 bits of width, and up to 15 bites of height.
          * Sprites are rendered by XOR-ing with the current framebuffer data.
          * If the program tries to draw with out-of-bounds initial coordinates, the values
-         * are reduced mod 32/64. If a sprite overflows the screen boundaries, it's clipped */
-        let y = vy % SCREEN_HEIGHT;
-        let first_influenced_byte = vx / 8;
-        let first_relative_bit = vx % 8;
-        let residue = 8 - first_relative_bit;
+         * are reduced mod 32 or mod 64, depending on the direction.
+         * If a sprite overflows the screen boundaries, it's clipped */
+        let x = self.reg[vx] as usize % SCREEN_WIDTH;
+        let y = self.reg[vy] as usize % SCREEN_HEIGHT;
+        let first_influenced_byte = x / 8;
+        let byte_offset = x % 8;
 
         let sum = y + val as usize;
         let last_row = if sum > SCREEN_HEIGHT {
@@ -338,24 +372,40 @@ impl Chip8 {
 
         let mut current_row = y;
         let mut sprite_row = 0;
+        let addr = u16::from_be(self.reg_vi);
 
         while current_row < last_row {
-            let sprite_chunk = self.ram[self.reg_vi as usize + sprite_row];
-            let left_chunk = sprite_chunk >> first_relative_bit;
-            let right_chunk = sprite_chunk << residue;
+            let sprite_chunk = self.ram[addr as usize + sprite_row];
+            let left_chunk = sprite_chunk >> byte_offset;
+
+            // there is a right chunk only if the left chunk is offset
+            // moreover, if the right chunk would fall off the screen, it's just ignored
+            let valid_right_chunk =
+                byte_offset != 0 && first_influenced_byte < SCREEN_WIDTH_IN_U8 - 1;
+
+            let right_chunk = if valid_right_chunk {
+                Some(sprite_chunk << (8 - byte_offset))
+            } else {
+                None
+            };
 
             // check whether something will be turned off
             // pixels will turn off if and only if they are a 1 and they will be XORed with a 1
             let flipped_left =
-                self.framebuffer.data[first_influenced_byte][current_row] & left_chunk != 0;
-            let flipped_right =
-                self.framebuffer.data[first_influenced_byte + 1][current_row] & right_chunk != 0;
+                self.framebuffer.data[current_row][first_influenced_byte] & left_chunk != 0;
+            let flipped_right = if let Some(rc) = right_chunk {
+                self.framebuffer.data[current_row][first_influenced_byte + 1] & rc != 0
+            } else {
+                false
+            };
 
             self.reg[0xF] = (flipped_left | flipped_right) as u8;
 
             // update framebuffer
-            self.framebuffer.data[first_influenced_byte][current_row] ^= left_chunk;
-            self.framebuffer.data[first_influenced_byte + 1][current_row] ^= right_chunk;
+            self.framebuffer.data[current_row][first_influenced_byte] ^= left_chunk;
+            if let Some(rc) = right_chunk {
+                self.framebuffer.data[current_row][first_influenced_byte + 1] ^= rc;
+            }
 
             current_row += 1;
             sprite_row += 1;
@@ -363,102 +413,138 @@ impl Chip8 {
 
         // send draw signal
         (self.draw_screen)(self.framebuffer.as_ref());
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn skp(&mut self, vx: usize) {
         /* EX9E - Skip next instruction if the key corresponding to [VX] is pressed */
-        if (self.is_pressed)(self.reg[vx]) {
-            self.program_counter += 2;
-        }
+        self.program_counter += if (self.is_pressed)(self.reg[vx]) {
+            2 * Chip8::INSTRUCTION_SIZE
+        } else {
+            Chip8::INSTRUCTION_SIZE
+        };
     }
 
     fn skpn(&mut self, vx: usize) {
         /* EXA1 - Skip next instruction if the key corresponding to [VX] is not pressed */
-        if !(self.is_pressed)(self.reg[vx]) {
-            self.program_counter += 2;
-        }
+        self.program_counter += if !(self.is_pressed)(self.reg[vx]) {
+            2 * Chip8::INSTRUCTION_SIZE
+        } else {
+            Chip8::INSTRUCTION_SIZE
+        };
     }
 
     fn ldt(&mut self, vx: usize) {
         /* FX07 - Store [DT] in VX */
         self.reg[vx] = (self.time_getter)();
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn wmovk(&mut self, vx: usize) {
         /* FX0A - Wait for a key press, store its value in VX */
         let key = (self.wait_for_key)();
         self.reg[vx] = key;
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn setdt(&mut self, vx: usize) {
         /* FX15 - Set DT to [VX] */
         (self.time_setter)(self.reg[vx]);
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn setst(&mut self, vx: usize) {
         /* FX18 - Set ST to [VX] */
         (self.sound_setter)(self.reg[vx]);
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn addi(&mut self, vx: usize) {
         /* FX1E - set VI to [VI] + [VX] */
-        self.reg_vi += self.reg[vx] as u16;
+        let current = u16::from_be(self.reg_vi);
+        let addr = current.wrapping_add(self.reg[vx] as u16);
+
+        self.reg_vi = u16::to_be(addr);
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn ldsprite(&mut self, vx: usize) {
         /* FX29 - Set VI to the address of the sprite for digit [VX] */
-        self.reg_vi = 5 * self.reg[vx] as u16;
+        let addr = DIGIT_SPRITE_SIZE as u16 * self.reg[vx] as u16;
+        self.reg_vi = u16::to_be(addr);
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn bcd(&mut self, vx: usize) {
         /* FX33 - Store BCD representation of [VX] in memory locations I, I+1, and I+2.
          * most-significant digit first */
-        self.ram[self.reg_vi as usize] = self.reg[vx] & 0b001;
-        self.ram[self.reg_vi as usize + 1] = self.reg[vx] & 0b010;
-        self.ram[self.reg_vi as usize + 2] = self.reg[vx] & 0b100;
+        let val = self.reg[vx];
+        let hundreds = val / 100;
+        let units = val % 10;
+        let tens = val / 10 - hundreds * 10;
+
+        let addr = u16::from_be(self.reg_vi) as usize;
+
+        self.ram[addr] = hundreds;
+        self.ram[addr + 1] = tens;
+        self.ram[addr + 2] = units;
+
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     #[cfg(feature = "legacy-opcodes")]
     fn ldarray(&mut self, vx: usize) {
         /* FX55 - Store values V0 to VX inclusive in memory starting from [VI]
          * set VI to [VI] + X + 1 after the operation */
+        let addr = u16::from_be(self.reg_vi) as usize;
+
         let mut i = 0;
         while i <= vx {
-            self.ram[self.reg_vi as usize + i] = self.reg[i];
+            self.ram[addr + i] = self.reg[i];
             i += 1;
         }
-        self.reg_vi += i;
+        self.reg_vi += i as u16;
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     #[cfg(not(feature = "legacy-opcodes"))]
     fn ldarray(&mut self, vx: usize) {
         /* FX55 - Store values V0 to VX inclusive in memory starting from [VI] */
+        let addr = u16::from_be(self.reg_vi) as usize;
+
         let mut i = 0;
         while i <= vx {
-            self.ram[self.reg_vi as usize + i] = self.reg[i];
+            self.ram[addr + i] = self.reg[i];
             i += 1;
         }
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     #[cfg(feature = "legacy-opcodes")]
     fn rdarray(&mut self, vx: usize) {
         /* FX65 - Fill registers V0 to VX inclusive with values from memory starting from [VI]
          * set VI to [VI] + X + 1 after the operation */
+        let addr = u16::from_be(self.reg_vi) as usize;
+
         let mut i = 0;
         while i <= vx {
-            self.reg[i] = self.ram[self.reg_vi as usize + i];
+            self.reg[i] = self.ram[addr + i];
             i += 1;
         }
-        self.reg_vi += i;
+        self.reg_vi += i as u16;
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     #[cfg(not(feature = "legacy-opcodes"))]
     fn rdarray(&mut self, vx: usize) {
         /* FX65 - Fill registers V0 to VX inclusive with values from memory starting from [VI] */
+        let addr = u16::from_be(self.reg_vi) as usize;
+
         let mut i = 0;
         while i <= vx {
-            self.reg[i] = self.ram[self.reg_vi as usize + i];
+            self.reg[i] = self.ram[addr + i];
             i += 1;
         }
+        self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 }
