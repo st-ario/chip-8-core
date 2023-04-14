@@ -46,34 +46,28 @@ const DIGITS_SPRITES: [u8; 80] = [
 
 const DIGIT_SPRITE_SIZE: u8 = 5;
 
+pub struct IOCallbacks<'a> {
+    pub sound_setter: &'a (dyn Fn(u8)),     // set sound timer register
+    pub time_setter: &'a (dyn Fn(u8)),      // set delay timer register
+    pub time_getter: &'a (dyn Fn() -> u8),  // get value of delay timer register
+    pub rng: &'a (dyn Fn() -> u8),          // generate random number
+    pub wait_for_key: &'a (dyn Fn() -> u8), // suspend execution until any key is pressed, return key value
+    pub is_pressed: &'a (dyn Fn(u8) -> bool), // check the key corresponding to the argument
+}
+
 pub struct Chip8<'a> {
-    framebuffer: FrameBufferInternal, // SCREEN_WIDTH x SCREEN_HEIGHT on/off pixel
+    framebuffer: FrameBufferInternal, // SCREEN_WIDTH x SCREEN_HEIGHT 1-byte bitsets of on/off pixels
     reg: [u8; 16],                    // general purpose registers
-    reg_vi: u16,                      // 16-bit register, used to store memory addresses
+    reg_vi: u16,                      // big-endian 16-bit register, used to store memory addresses
     program_counter: u16,             // pseudo-register "pc"
     stack_pointer: u8,                // pseudo-register "sp"
     call_stack: [u16; 16],            // 16 levels of nested subroutines, panic on stack overflow
+    callbacks: IOCallbacks<'a>,
     ram: [u8; RAM_SIZE],
-    sound_setter: &'a (dyn Fn(u8)),    // set sound timer register
-    time_setter: &'a (dyn Fn(u8)),     // set delay timer register
-    time_getter: &'a (dyn Fn() -> u8), // get value of delay timer register
-    draw_screen: &'a (dyn Fn(&FrameBuffer)), // handle draw calls
-    is_pressed: &'a (dyn Fn(u8) -> bool), // check the key corresponding to the argument
-    wait_for_key: &'a (dyn Fn() -> u8), // suspend execution until a key is pressed, return key value
-    rng: &'a (dyn Fn() -> u8),          // generate random number
 }
 
 impl<'a> Chip8<'a> {
-    pub fn new(
-        program: &[u8],
-        sound_setter: &'a (dyn Fn(u8)),
-        time_setter: &'a (dyn Fn(u8)),
-        time_getter: &'a (dyn Fn() -> u8),
-        draw_screen: &'a (dyn Fn(&FrameBuffer)),
-        is_pressed: &'a (dyn Fn(u8) -> bool),
-        wait_for_key: &'a (dyn Fn() -> u8),
-        rng: &'a (dyn Fn() -> u8),
-    ) -> Chip8<'a> {
+    pub fn new(program: &[u8], callbacks: IOCallbacks<'a>) -> Chip8<'a> {
         let mut res = Chip8 {
             framebuffer: FrameBufferInternal::default(),
             reg: [0; 16],
@@ -82,16 +76,11 @@ impl<'a> Chip8<'a> {
             program_counter: 0,
             stack_pointer: 0,
             ram: [0; RAM_SIZE],
-            sound_setter,
-            time_setter,
-            time_getter,
-            draw_screen,
-            is_pressed,
-            wait_for_key,
-            rng,
+            callbacks,
         };
 
-        // system initialization
+        /* system initialization */
+
         // 0x000 to 0x1FF: reserved
         res.ram[0..80].copy_from_slice(&DIGITS_SPRITES);
         // programs start at 0x200
@@ -184,7 +173,6 @@ impl<'a> Chip8<'a> {
     fn cls(&mut self) {
         /* 0x00E0 - Clear screen */
         self.framebuffer = FrameBufferInternal::default();
-        (self.draw_screen)(self.framebuffer.as_ref());
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
@@ -349,7 +337,7 @@ impl<'a> Chip8<'a> {
 
     fn rnd(&mut self, vx: usize, val: u8) {
         /* CXNN - Set VX to random byte AND val */
-        self.reg[vx] = (self.rng)() & val;
+        self.reg[vx] = (self.callbacks.rng)() & val;
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
@@ -378,6 +366,7 @@ impl<'a> Chip8<'a> {
         let mut sprite_row = 0;
         let addr = u16::from_be(self.reg_vi);
 
+        /* framebuffer update */
         while current_row < last_row {
             let sprite_chunk = self.ram[addr as usize + sprite_row];
             let left_chunk = sprite_chunk >> byte_offset;
@@ -415,14 +404,12 @@ impl<'a> Chip8<'a> {
             sprite_row += 1;
         }
 
-        // send draw signal
-        (self.draw_screen)(self.framebuffer.as_ref());
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn skp(&mut self, vx: usize) {
         /* EX9E - Skip next instruction if the key corresponding to [VX] is pressed */
-        self.program_counter += if (self.is_pressed)(self.reg[vx]) {
+        self.program_counter += if (self.callbacks.is_pressed)(self.reg[vx]) {
             2 * Chip8::INSTRUCTION_SIZE
         } else {
             Chip8::INSTRUCTION_SIZE
@@ -431,7 +418,7 @@ impl<'a> Chip8<'a> {
 
     fn skpn(&mut self, vx: usize) {
         /* EXA1 - Skip next instruction if the key corresponding to [VX] is not pressed */
-        self.program_counter += if !(self.is_pressed)(self.reg[vx]) {
+        self.program_counter += if !(self.callbacks.is_pressed)(self.reg[vx]) {
             2 * Chip8::INSTRUCTION_SIZE
         } else {
             Chip8::INSTRUCTION_SIZE
@@ -440,26 +427,26 @@ impl<'a> Chip8<'a> {
 
     fn ldt(&mut self, vx: usize) {
         /* FX07 - Store [DT] in VX */
-        self.reg[vx] = (self.time_getter)();
+        self.reg[vx] = (self.callbacks.time_getter)();
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn wmovk(&mut self, vx: usize) {
         /* FX0A - Wait for a key press, store its value in VX */
-        let key = (self.wait_for_key)();
+        let key = (self.callbacks.wait_for_key)();
         self.reg[vx] = key;
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn setdt(&mut self, vx: usize) {
         /* FX15 - Set DT to [VX] */
-        (self.time_setter)(self.reg[vx]);
+        (self.callbacks.time_setter)(self.reg[vx]);
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn setst(&mut self, vx: usize) {
         /* FX18 - Set ST to [VX] */
-        (self.sound_setter)(self.reg[vx]);
+        (self.callbacks.sound_setter)(self.reg[vx]);
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
