@@ -101,6 +101,10 @@ impl<'a> Chip8<'a> {
         res
     }
 
+    pub fn fb_ref(&self) -> &FrameBuffer {
+        self.framebuffer.as_ref()
+    }
+
     const INSTRUCTION_SIZE: u16 = std::mem::size_of::<u16>() as u16;
 
     pub fn execute_next_instruction(&mut self) {
