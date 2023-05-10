@@ -262,55 +262,80 @@ impl<'a> Chip8<'a> {
 
     fn addv(&mut self, vx: usize, vy: usize) {
         /* 8XY4 - Store [VX] + [VY] in VX, store boolean carry in VF */
-        let res = self.reg[vx].overflowing_add(self.reg[vy]);
-        self.reg[vx] = res.0;
-        self.reg[0xF] = res.1 as u8;
+        let sum = vx as u16 + vy as u16;
+        let carry = sum > u8::MAX as u16;
+
+        self.reg[vx] = self.reg[vx].wrapping_add(self.reg[vy]);
+        self.reg[0xF] = carry as u8;
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn sub(&mut self, vx: usize, vy: usize) {
         /* 8XY5 - Store [VX] - [VY] in VX, set VF = NOT borrow as bool */
-        self.reg[0xF] = (self.reg[vx] > self.reg[vy]) as u8;
-        self.reg[vx] = self.reg[vx].wrapping_sub(self.reg[vy]);
+        let not_borrow = (self.reg[vx] >= self.reg[vy]) as u8;
+        let res = self.reg[vx].wrapping_sub(self.reg[vy]);
+
+        self.reg[vx] = res;
+        self.reg[0xF] = not_borrow;
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     #[cfg(not(feature = "variant-opcodes"))]
     fn shr(&mut self, vx: usize, vy: usize) {
         /* 8XY6 - Set VX as [VY] >> 1, set VF = least-significant bit before shift */
-        self.reg[0xF] = self.reg[vy] & 0x1;
-        self.reg[vx] = self.reg[vy] >> 1;
+        let lsb = self.reg[vy] & 0x1;
+        let res = self.reg[vy] >> 1;
+
+        self.reg[vx] = res;
+        self.reg[0xF] = lsb;
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     #[cfg(feature = "variant-opcodes")]
     fn shr(&mut self, vx: usize, _vy: usize) {
         /* 8XY6 - Set VX as [VX] >> 1, set VF = least-significant bit before shift */
-        self.reg[0xF] = self.reg[vx] & 0x1;
+        let lsb = self.reg[vx] & 0x1;
+
         self.reg[vx] >>= 1;
+        self.reg[0xF] = lsb;
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
     fn subn(&mut self, vx: usize, vy: usize) {
         /* 8XY7 - Store [VY] - [VX] in VX, set VF = NOT borrow */
-        self.reg[0xF] = (self.reg[vy] > self.reg[vx]) as u8;
-        self.reg[vx] = self.reg[vy].wrapping_sub(self.reg[vx]);
+        let not_borrow = (self.reg[vy] >= self.reg[vx]) as u8;
+        let res = self.reg[vy].wrapping_sub(self.reg[vx]);
+
+        self.reg[vx] = res;
+        self.reg[0xF] = not_borrow;
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(not(feature = "variant-shift-opcodes"))]
+    #[cfg(not(feature = "variant-opcodes"))]
     fn shl(&mut self, vx: usize, vy: usize) {
         /* 8XYE - Set VX as [VY] << 1, set VF = most-significant bit before shift */
-        self.reg[0xF] = self.reg[vy] & 0b1000_0000;
-        self.reg[vx] = self.reg[vy] << 1;
+        let msb = self.reg[vy] & 0b1000_0000;
+        let res = self.reg[vy] << 1;
+
+        self.reg[vx] = res;
+        self.reg[0xF] = msb;
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(feature = "variant-shift-opcodes")]
+    #[cfg(feature = "variant-opcodes")]
     fn shl(&mut self, vx: usize, _vy: usize) {
         /* 8XYE - Set VX as [VX] << 1, set VF = most-significant bit before shift */
-        self.reg[0xF] = self.reg[vx] & 0b1000_0000;
+        let msb = self.reg[vx] & 0b1000_0000;
+
         self.reg[vx] <<= 1;
+        self.reg[0xF] = msb;
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
@@ -366,6 +391,9 @@ impl<'a> Chip8<'a> {
         let mut sprite_row = 0;
         let addr = u16::from_be(self.reg_vi);
 
+        let mut flipped_any = false;
+        self.reg[0xF] = flipped_any as u8;
+
         /* framebuffer update */
         while current_row < last_row {
             let sprite_chunk = self.ram[addr as usize + sprite_row];
@@ -392,7 +420,10 @@ impl<'a> Chip8<'a> {
                 false
             };
 
-            self.reg[0xF] = (flipped_left | flipped_right) as u8;
+            if !flipped_any {
+                flipped_any = flipped_left | flipped_right;
+                self.reg[0xF] = flipped_any as u8;
+            }
 
             // update framebuffer
             self.framebuffer.data[current_row][first_influenced_byte] ^= left_chunk;
