@@ -59,9 +59,9 @@ pub struct Chip8<'a> {
     framebuffer: FrameBufferInternal, // SCREEN_WIDTH x SCREEN_HEIGHT 1-byte bitsets of on/off pixels
     reg: [u8; 16],                    // general purpose registers
     reg_vi: u16,                      // big-endian 16-bit register, used to store memory addresses
-    program_counter: u16,             // pseudo-register "pc"
+    program_counter: u16,             // native endianness, pseudo-register "pc"
     stack_pointer: u8,                // pseudo-register "sp"
-    call_stack: [u16; 16],            // 16 levels of nested subroutines, panic on stack overflow
+    call_stack: [u16; 16], // native endianness, 16 levels of nested subroutines, panic on stack overflow
     callbacks: IOCallbacks<'a>,
     ram: [u8; RAM_SIZE],
 }
@@ -275,7 +275,7 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(feature = "legacy-opcodes")]
+    #[cfg(not(feature = "variant-opcodes"))]
     fn shr(&mut self, vx: usize, vy: usize) {
         /* 8XY6 - Set VX as [VY] >> 1, set VF = least-significant bit before shift */
         self.reg[0xF] = self.reg[vy] & 0x1;
@@ -283,7 +283,7 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(not(feature = "legacy-opcodes"))]
+    #[cfg(feature = "variant-opcodes")]
     fn shr(&mut self, vx: usize, _vy: usize) {
         /* 8XY6 - Set VX as [VX] >> 1, set VF = least-significant bit before shift */
         self.reg[0xF] = self.reg[vx] & 0x1;
@@ -298,7 +298,7 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(feature = "legacy-opcodes")]
+    #[cfg(not(feature = "variant-shift-opcodes"))]
     fn shl(&mut self, vx: usize, vy: usize) {
         /* 8XYE - Set VX as [VY] << 1, set VF = most-significant bit before shift */
         self.reg[0xF] = self.reg[vy] & 0b1000_0000;
@@ -306,7 +306,7 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(not(feature = "legacy-opcodes"))]
+    #[cfg(feature = "variant-shift-opcodes")]
     fn shl(&mut self, vx: usize, _vy: usize) {
         /* 8XYE - Set VX as [VX] << 1, set VF = most-significant bit before shift */
         self.reg[0xF] = self.reg[vx] & 0b1000_0000;
@@ -483,7 +483,7 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(feature = "legacy-opcodes")]
+    #[cfg(not(feature = "variant-opcodes"))]
     fn ldarray(&mut self, vx: usize) {
         /* FX55 - Store values V0 to VX inclusive in memory starting from [VI]
          * set VI to [VI] + X + 1 after the operation */
@@ -494,11 +494,14 @@ impl<'a> Chip8<'a> {
             self.ram[addr + i] = self.reg[i];
             i += 1;
         }
-        self.reg_vi += i as u16;
+
+        let res = u16::from_be(self.reg_vi) + i as u16;
+        self.reg_vi = u16::to_be(res);
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(not(feature = "legacy-opcodes"))]
+    #[cfg(feature = "variant-opcodes")]
     fn ldarray(&mut self, vx: usize) {
         /* FX55 - Store values V0 to VX inclusive in memory starting from [VI] */
         let addr = u16::from_be(self.reg_vi) as usize;
@@ -508,10 +511,11 @@ impl<'a> Chip8<'a> {
             self.ram[addr + i] = self.reg[i];
             i += 1;
         }
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(feature = "legacy-opcodes")]
+    #[cfg(not(feature = "variant-opcodes"))]
     fn rdarray(&mut self, vx: usize) {
         /* FX65 - Fill registers V0 to VX inclusive with values from memory starting from [VI]
          * set VI to [VI] + X + 1 after the operation */
@@ -522,11 +526,14 @@ impl<'a> Chip8<'a> {
             self.reg[i] = self.ram[addr + i];
             i += 1;
         }
-        self.reg_vi += i as u16;
+
+        let res = u16::from_be(self.reg_vi) + i as u16;
+        self.reg_vi = u16::to_be(res);
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(not(feature = "legacy-opcodes"))]
+    #[cfg(feature = "variant-opcodes")]
     fn rdarray(&mut self, vx: usize) {
         /* FX65 - Fill registers V0 to VX inclusive with values from memory starting from [VI] */
         let addr = u16::from_be(self.reg_vi) as usize;
@@ -536,6 +543,7 @@ impl<'a> Chip8<'a> {
             self.reg[i] = self.ram[addr + i];
             i += 1;
         }
+
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 }
