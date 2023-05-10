@@ -47,12 +47,12 @@ const DIGITS_SPRITES: [u8; 80] = [
 const DIGIT_SPRITE_SIZE: u8 = 5;
 
 pub struct IOCallbacks<'a> {
-    pub sound_setter: &'a (dyn Fn(u8)),     // set sound timer register
-    pub time_setter: &'a (dyn Fn(u8)),      // set delay timer register
-    pub time_getter: &'a (dyn Fn() -> u8),  // get value of delay timer register
-    pub rng: &'a (dyn Fn() -> u8),          // generate random number
-    pub wait_for_key: &'a (dyn Fn() -> u8), // suspend execution until any key is pressed, return key value
-    pub is_pressed: &'a (dyn Fn(u8) -> bool), // check the key corresponding to the argument
+    pub sound_setter: &'a (dyn Fn(u8) + Send + Sync), // set sound timer register
+    pub time_setter: &'a (dyn Fn(u8) + Send + Sync),  // set delay timer register
+    pub time_getter: &'a (dyn Fn() -> u8 + Send + Sync), // get value of delay timer register
+    pub rng: &'a (dyn Fn() -> u8 + Send + Sync),      // generate random number
+    pub wait_for_key: &'a (dyn Fn() -> u8 + Send + Sync), // suspend execution until any key is pressed, return key value
+    pub is_pressed: &'a (dyn Fn(u8) -> bool + Send + Sync), // check the key corresponding to the argument
 }
 
 pub struct Chip8<'a> {
