@@ -94,7 +94,7 @@ impl<'a> Chip8<'a> {
         self.framebuffer.as_ref()
     }
 
-    const INSTRUCTION_SIZE: u16 = std::mem::size_of::<u16>() as u16;
+    const INSTRUCTION_SIZE: u16 = core::mem::size_of::<u16>() as u16;
 
     pub fn execute_next_instruction(&mut self) {
         let instr_begin = self.program_counter as usize;
@@ -262,7 +262,7 @@ impl<'a> Chip8<'a> {
 
     fn addv(&mut self, vx: usize, vy: usize) {
         /* 8XY4 - Store [VX] + [VY] in VX, store boolean carry in VF */
-        let sum = vx as u16 + vy as u16;
+        let sum = self.reg[vx] as u16 + self.reg[vy] as u16;
         let carry = sum > u8::MAX as u16;
 
         self.reg[vx] = self.reg[vx].wrapping_add(self.reg[vy]);
@@ -319,11 +319,11 @@ impl<'a> Chip8<'a> {
     #[cfg(not(feature = "variant-opcodes"))]
     fn shl(&mut self, vx: usize, vy: usize) {
         /* 8XYE - Set VX as [VY] << 1, set VF = most-significant bit before shift */
-        let msb = self.reg[vy] & 0b1000_0000;
+        let msb = (self.reg[vy] & 0b1000_0000) != 0;
         let res = self.reg[vy] << 1;
 
         self.reg[vx] = res;
-        self.reg[0xF] = msb;
+        self.reg[0xF] = msb as u8;
 
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
@@ -331,10 +331,10 @@ impl<'a> Chip8<'a> {
     #[cfg(feature = "variant-opcodes")]
     fn shl(&mut self, vx: usize, _vy: usize) {
         /* 8XYE - Set VX as [VX] << 1, set VF = most-significant bit before shift */
-        let msb = self.reg[vx] & 0b1000_0000;
+        let msb = (self.reg[vx] & 0b1000_0000) != 0;
 
         self.reg[vx] <<= 1;
-        self.reg[0xF] = msb;
+        self.reg[0xF] = msb as u8;
 
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
@@ -374,12 +374,22 @@ impl<'a> Chip8<'a> {
          * Sprites are rendered by XOR-ing with the current framebuffer data.
          * If the program tries to draw with out-of-bounds initial coordinates, the values
          * are reduced mod 32 or mod 64, depending on the direction.
-         * If a sprite overflows the screen boundaries, it's clipped */
+         * Some roms (notably the ones compiled using Octo: https://github.com/JohnEarnest/Octo)
+         * expect a wraparound behavior ()
+         * Some roms expect that if a sprite overflows the screen boundaries, it's clipped;
+         * If the library is compiled with no_std, the desired behavior can be selected through
+         * crate features at compile time.
+         * If the library is compiled with std, the desired behavior can be selected through
+         * the `self.clipping` flag at runtime (TODO) */
         let x = self.reg[vx] as usize % SCREEN_WIDTH;
         let y = self.reg[vy] as usize % SCREEN_HEIGHT;
-        let first_influenced_byte = x / 8;
+
+        // the first byte that can be influenced by drawing the sprite
+        let left_idx = x / 8;
         let byte_offset = x % 8;
 
+        // how many rows to process
+        // TODO wraparound needs to change this part too
         let sum = y + val as usize;
         let last_row = if sum > SCREEN_HEIGHT {
             SCREEN_HEIGHT
@@ -387,22 +397,38 @@ impl<'a> Chip8<'a> {
             sum
         };
 
-        let mut current_row = y;
-        let mut sprite_row = 0;
         let addr = u16::from_be(self.reg_vi);
 
-        let mut flipped_any = false;
-        self.reg[0xF] = flipped_any as u8;
-
         /* framebuffer update */
+        let mut current_row = y;
+        let mut sprite_row = 0;
+        self.reg[0xF] = false as u8;
+
         while current_row < last_row {
             let sprite_chunk = self.ram[addr as usize + sprite_row];
             let left_chunk = sprite_chunk >> byte_offset;
 
-            // there is a right chunk only if the left chunk is offset
-            // moreover, if the right chunk would fall off the screen, it's just ignored
-            let valid_right_chunk =
-                byte_offset != 0 && first_influenced_byte < SCREEN_WIDTH_IN_U8 - 1;
+            let mut valid_right_chunk: bool = false;
+            let mut right_idx: Option<usize> = None;
+
+            #[cfg(feature = "sprite-clipping")]
+            {
+                _clipping(
+                    &mut valid_right_chunk,
+                    &mut right_idx,
+                    left_idx,
+                    byte_offset,
+                );
+            }
+            #[cfg(not(feature = "sprite-clipping"))]
+            {
+                _wrapping(
+                    &mut valid_right_chunk,
+                    &mut right_idx,
+                    left_idx,
+                    byte_offset,
+                );
+            };
 
             let right_chunk = if valid_right_chunk {
                 Some(sprite_chunk << (8 - byte_offset))
@@ -410,25 +436,24 @@ impl<'a> Chip8<'a> {
                 None
             };
 
-            // check whether something will be turned off
-            // pixels will turn off if and only if they are a 1 and they will be XORed with a 1
-            let flipped_left =
-                self.framebuffer.data[current_row][first_influenced_byte] & left_chunk != 0;
-            let flipped_right = if let Some(rc) = right_chunk {
-                self.framebuffer.data[current_row][first_influenced_byte + 1] & rc != 0
+            // pixels will turn off (flip) if and only if they are a 1 and they will be XORed with a 1
+
+            // update left chunk
+            let any_flip_left = self.framebuffer.data[current_row][left_idx] & left_chunk != 0;
+            self.framebuffer.data[current_row][left_idx] ^= left_chunk;
+
+            // update right chunk
+            let any_flip_right;
+            if let (Some(rc), Some(ridx)) = (right_chunk, right_idx) {
+                any_flip_right = self.framebuffer.data[current_row][ridx] & rc != 0;
+                self.framebuffer.data[current_row][ridx] ^= rc;
             } else {
-                false
+                any_flip_right = false;
             };
 
-            if !flipped_any {
-                flipped_any = flipped_left | flipped_right;
-                self.reg[0xF] = flipped_any as u8;
-            }
-
-            // update framebuffer
-            self.framebuffer.data[current_row][first_influenced_byte] ^= left_chunk;
-            if let Some(rc) = right_chunk {
-                self.framebuffer.data[current_row][first_influenced_byte + 1] ^= rc;
+            // update VF
+            if any_flip_left | any_flip_right {
+                self.reg[0xF] = true as u8;
             }
 
             current_row += 1;
@@ -484,9 +509,9 @@ impl<'a> Chip8<'a> {
     fn addi(&mut self, vx: usize) {
         /* FX1E - set VI to [VI] + [VX] */
         let current = u16::from_be(self.reg_vi);
-        let addr = current.wrapping_add(self.reg[vx] as u16);
+        let res = current + self.reg[vx] as u16;
 
-        self.reg_vi = u16::to_be(addr);
+        self.reg_vi = u16::to_be(res);
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
@@ -518,7 +543,8 @@ impl<'a> Chip8<'a> {
     fn ldarray(&mut self, vx: usize) {
         /* FX55 - Store values V0 to VX inclusive in memory starting from [VI]
          * set VI to [VI] + X + 1 after the operation */
-        let addr = u16::from_be(self.reg_vi) as usize;
+        let vi_native = u16::from_be(self.reg_vi);
+        let addr = vi_native as usize;
 
         let mut i = 0;
         while i <= vx {
@@ -526,9 +552,7 @@ impl<'a> Chip8<'a> {
             i += 1;
         }
 
-        let res = u16::from_be(self.reg_vi) + i as u16;
-        self.reg_vi = u16::to_be(res);
-
+        self.reg_vi = u16::to_be(vi_native + i as u16);
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
@@ -550,7 +574,8 @@ impl<'a> Chip8<'a> {
     fn rdarray(&mut self, vx: usize) {
         /* FX65 - Fill registers V0 to VX inclusive with values from memory starting from [VI]
          * set VI to [VI] + X + 1 after the operation */
-        let addr = u16::from_be(self.reg_vi) as usize;
+        let vi_native = u16::from_be(self.reg_vi);
+        let addr = vi_native as usize;
 
         let mut i = 0;
         while i <= vx {
@@ -558,9 +583,7 @@ impl<'a> Chip8<'a> {
             i += 1;
         }
 
-        let res = u16::from_be(self.reg_vi) + i as u16;
-        self.reg_vi = u16::to_be(res);
-
+        self.reg_vi = u16::to_be(vi_native + i as u16);
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
@@ -577,4 +600,36 @@ impl<'a> Chip8<'a> {
 
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
+}
+
+/* utility functions for `Chip8::display()` */
+
+#[inline(always)]
+fn _clipping(
+    valid_right_chunk: &mut bool,
+    right_idx: &mut Option<usize>,
+    left_idx: usize,
+    byte_offset: usize,
+) {
+    // there is a right chunk only if the left chunk is offset
+    // moreover, if the right chunk would fall off the screen, it's just ignored
+    *valid_right_chunk = byte_offset != 0 && left_idx < SCREEN_WIDTH_IN_U8 - 1;
+    *right_idx = Some(left_idx + 1);
+}
+
+#[inline(always)]
+fn _wrapping(
+    valid_right_chunk: &mut bool,
+    right_idx: &mut Option<usize>,
+    left_idx: usize,
+    byte_offset: usize,
+) {
+    // there is a right chunk only if the left chunk is offset
+    *valid_right_chunk = byte_offset != 0;
+
+    *right_idx = if left_idx == SCREEN_WIDTH_IN_U8 - 1 {
+        None
+    } else {
+        Some(left_idx + 1)
+    };
 }
