@@ -1,21 +1,20 @@
 [package]
 authors = ["Stefano Ariotta sqrtstefano@gmail.com"]
 name = "chip-8-core"
-version = "0.1.0"
+version = "0.9.0"
 edition = "2021"
 
 [features]
-# user must specify whether they want std or no_std
 default = []
 
-# opcodes compatibility options can be determined at runtime
-std = []
+no-std = ["compiletime-compat"]
 
 # opcodes compatibility options will be determined at compile time
-no-std = []
+compiletime-compat = []
 
 # option: SCHIP-compatible bitshifts and load/store operations
-variant-opcodes = ["no-std"]
+variant-opcodes = ["compiletime-compat"]
 
 # option: draw clipping sprites instead of wrapping around (see `Chip8::display()` documentation)
-sprite-clipping = ["no-std"]
+sprite-clipping = ["compiletime-compat"]
+

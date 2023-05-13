@@ -64,10 +64,18 @@ pub struct Chip8<'a> {
     call_stack: [u16; 16], // native endianness, 16 levels of nested subroutines, panic on stack overflow
     callbacks: IOCallbacks<'a>,
     ram: [u8; RAM_SIZE],
+    _schip_compat: bool, // ignored on no_std; determines whether to use SCHIP-compatible opcodes
+    _sprite_clipping: bool, // ignored on no_std; determines whether sprites should clip or wrap
+                         // around if they end up partially out of the screen
 }
 
 impl<'a> Chip8<'a> {
-    pub fn new(program: &[u8], callbacks: IOCallbacks<'a>) -> Chip8<'a> {
+    pub fn new(
+        program: &[u8],
+        callbacks: IOCallbacks<'a>,
+        _sprite_clipping: bool,
+        _schip_compat: bool,
+    ) -> Self {
         let mut res = Chip8 {
             framebuffer: FrameBufferInternal::default(),
             reg: [0; 16],
@@ -76,6 +84,8 @@ impl<'a> Chip8<'a> {
             program_counter: 0,
             stack_pointer: 0,
             ram: [0; RAM_SIZE],
+            _sprite_clipping,
+            _schip_compat,
             callbacks,
         };
 
@@ -88,6 +98,10 @@ impl<'a> Chip8<'a> {
         res.program_counter = 0x200;
 
         res
+    }
+
+    pub fn set_sprite_clipping(&mut self, val: bool) {
+        self._sprite_clipping = val
     }
 
     pub fn fb_ref(&self) -> &FrameBuffer {
@@ -282,8 +296,8 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(not(feature = "variant-opcodes"))]
-    fn shr(&mut self, vx: usize, vy: usize) {
+    #[inline(always)]
+    fn _shr_standard(&mut self, vx: usize, vy: usize) {
         /* 8XY6 - Set VX as [VY] >> 1, set VF = least-significant bit before shift */
         let lsb = self.reg[vy] & 0x1;
         let res = self.reg[vy] >> 1;
@@ -294,8 +308,8 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(feature = "variant-opcodes")]
-    fn shr(&mut self, vx: usize, _vy: usize) {
+    #[inline(always)]
+    fn _shr_schip(&mut self, vx: usize, _vy: usize) {
         /* 8XY6 - Set VX as [VX] >> 1, set VF = least-significant bit before shift */
         let lsb = self.reg[vx] & 0x1;
 
@@ -303,6 +317,25 @@ impl<'a> Chip8<'a> {
         self.reg[0xF] = lsb;
 
         self.program_counter += Chip8::INSTRUCTION_SIZE;
+    }
+
+    #[cfg(all(feature = "compiletime-compat", not(feature = "variant-opcodes")))]
+    fn shr(&mut self, vx: usize, vy: usize) {
+        self._shr_standard(vx, vy)
+    }
+
+    #[cfg(all(feature = "compiletime-compat", feature = "variant-opcodes"))]
+    fn shr(&mut self, vx: usize, _vy: usize) {
+        self._shr_schip(vx, _vy)
+    }
+
+    #[cfg(not(feature = "compiletime-compat"))]
+    fn shr(&mut self, vx: usize, vy: usize) {
+        if self._schip_compat {
+            self._shr_schip(vx, vy)
+        } else {
+            self._shr_standard(vx, vy)
+        }
     }
 
     fn subn(&mut self, vx: usize, vy: usize) {
@@ -315,9 +348,8 @@ impl<'a> Chip8<'a> {
 
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
-
-    #[cfg(not(feature = "variant-opcodes"))]
-    fn shl(&mut self, vx: usize, vy: usize) {
+    #[inline(always)]
+    fn _shl_standard(&mut self, vx: usize, vy: usize) {
         /* 8XYE - Set VX as [VY] << 1, set VF = most-significant bit before shift */
         let msb = (self.reg[vy] & 0b1000_0000) != 0;
         let res = self.reg[vy] << 1;
@@ -328,8 +360,8 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(feature = "variant-opcodes")]
-    fn shl(&mut self, vx: usize, _vy: usize) {
+    #[inline(always)]
+    fn _shl_schip(&mut self, vx: usize, _vy: usize) {
         /* 8XYE - Set VX as [VX] << 1, set VF = most-significant bit before shift */
         let msb = (self.reg[vx] & 0b1000_0000) != 0;
 
@@ -337,6 +369,25 @@ impl<'a> Chip8<'a> {
         self.reg[0xF] = msb as u8;
 
         self.program_counter += Chip8::INSTRUCTION_SIZE;
+    }
+
+    #[cfg(all(feature = "compiletime-compat", not(feature = "variant-opcodes")))]
+    fn shl(&mut self, vx: usize, vy: usize) {
+        self._shl_standard(vx, vy)
+    }
+
+    #[cfg(all(feature = "compiletime-compat", feature = "variant-opcodes"))]
+    fn shl(&mut self, vx: usize, _vy: usize) {
+        self._shl_schip(vx, _vy)
+    }
+
+    #[cfg(not(feature = "compiletime-compat"))]
+    fn shl(&mut self, vx: usize, vy: usize) {
+        if self._schip_compat {
+            self._shl_schip(vx, vy)
+        } else {
+            self._shl_standard(vx, vy)
+        }
     }
 
     fn snev(&mut self, vx: usize, vy: usize) {
@@ -388,15 +439,6 @@ impl<'a> Chip8<'a> {
         let left_idx = x / 8;
         let byte_offset = x % 8;
 
-        // how many rows to process
-        // TODO wraparound needs to change this part too
-        let sum = y + val as usize;
-        let last_row = if sum > SCREEN_HEIGHT {
-            SCREEN_HEIGHT
-        } else {
-            sum
-        };
-
         let addr = u16::from_be(self.reg_vi);
 
         /* framebuffer update */
@@ -404,31 +446,52 @@ impl<'a> Chip8<'a> {
         let mut sprite_row = 0;
         self.reg[0xF] = false as u8;
 
-        while current_row < last_row {
+        while sprite_row < val as usize {
             let sprite_chunk = self.ram[addr as usize + sprite_row];
             let left_chunk = sprite_chunk >> byte_offset;
 
             let mut valid_right_chunk: bool = false;
             let mut right_idx: Option<usize> = None;
 
-            #[cfg(feature = "sprite-clipping")]
+            /* manage horizontal wraparound/clipping */
             {
-                _clipping(
-                    &mut valid_right_chunk,
-                    &mut right_idx,
-                    left_idx,
-                    byte_offset,
-                );
+                #[cfg(all(feature = "compiletime-compat", feature = "sprite-clipping"))]
+                {
+                    _clipping(
+                        &mut valid_right_chunk,
+                        &mut right_idx,
+                        left_idx,
+                        byte_offset,
+                    );
+                }
+                #[cfg(all(feature = "compiletime-compat", not(feature = "sprite-clipping")))]
+                {
+                    _wrapping(
+                        &mut valid_right_chunk,
+                        &mut right_idx,
+                        left_idx,
+                        byte_offset,
+                    );
+                };
+                #[cfg(not(feature = "compiletime-compat"))]
+                {
+                    if self._sprite_clipping {
+                        _clipping(
+                            &mut valid_right_chunk,
+                            &mut right_idx,
+                            left_idx,
+                            byte_offset,
+                        );
+                    } else {
+                        _wrapping(
+                            &mut valid_right_chunk,
+                            &mut right_idx,
+                            left_idx,
+                            byte_offset,
+                        );
+                    }
+                }
             }
-            #[cfg(not(feature = "sprite-clipping"))]
-            {
-                _wrapping(
-                    &mut valid_right_chunk,
-                    &mut right_idx,
-                    left_idx,
-                    byte_offset,
-                );
-            };
 
             let right_chunk = if valid_right_chunk {
                 Some(sprite_chunk << (8 - byte_offset))
@@ -456,8 +519,28 @@ impl<'a> Chip8<'a> {
                 self.reg[0xF] = true as u8;
             }
 
-            current_row += 1;
             sprite_row += 1;
+            current_row += 1;
+
+            /* manage vertical wraparound/clipping */
+            if current_row >= SCREEN_HEIGHT {
+                #[cfg(all(feature = "compiletime-compat", feature = "sprite-clipping"))]
+                {
+                    break;
+                }
+                #[cfg(all(feature = "compiletime-compat", not(feature = "sprite-clipping")))]
+                {
+                    current_row = 0;
+                }
+                #[cfg(not(feature = "compiletime-compat"))]
+                {
+                    if self._sprite_clipping {
+                        break;
+                    } else {
+                        current_row = 0;
+                    }
+                }
+            }
         }
 
         self.program_counter += Chip8::INSTRUCTION_SIZE;
@@ -539,8 +622,8 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(not(feature = "variant-opcodes"))]
-    fn ldarray(&mut self, vx: usize) {
+    #[inline(always)]
+    fn _ldarray_standard(&mut self, vx: usize) {
         /* FX55 - Store values V0 to VX inclusive in memory starting from [VI]
          * set VI to [VI] + X + 1 after the operation */
         let vi_native = u16::from_be(self.reg_vi);
@@ -556,8 +639,8 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(feature = "variant-opcodes")]
-    fn ldarray(&mut self, vx: usize) {
+    #[inline(always)]
+    fn _ldarray_schip(&mut self, vx: usize) {
         /* FX55 - Store values V0 to VX inclusive in memory starting from [VI] */
         let addr = u16::from_be(self.reg_vi) as usize;
 
@@ -570,8 +653,27 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(not(feature = "variant-opcodes"))]
-    fn rdarray(&mut self, vx: usize) {
+    #[cfg(all(feature = "compiletime-compat", not(feature = "variant-opcodes")))]
+    fn ldarray(&mut self, vx: usize) {
+        self._ldarray_standard(vx)
+    }
+
+    #[cfg(all(feature = "compiletime-compat", feature = "variant-opcodes"))]
+    fn ldarray(&mut self, vx: usize) {
+        self._ldarray_schip(vx)
+    }
+
+    #[cfg(not(feature = "compiletime-compat"))]
+    fn ldarray(&mut self, vx: usize) {
+        if self._schip_compat {
+            self._ldarray_schip(vx)
+        } else {
+            self._ldarray_standard(vx)
+        }
+    }
+
+    #[inline(always)]
+    fn _rdarray_standard(&mut self, vx: usize) {
         /* FX65 - Fill registers V0 to VX inclusive with values from memory starting from [VI]
          * set VI to [VI] + X + 1 after the operation */
         let vi_native = u16::from_be(self.reg_vi);
@@ -587,8 +689,8 @@ impl<'a> Chip8<'a> {
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
-    #[cfg(feature = "variant-opcodes")]
-    fn rdarray(&mut self, vx: usize) {
+    #[inline(always)]
+    fn _rdarray_schip(&mut self, vx: usize) {
         /* FX65 - Fill registers V0 to VX inclusive with values from memory starting from [VI] */
         let addr = u16::from_be(self.reg_vi) as usize;
 
@@ -599,6 +701,26 @@ impl<'a> Chip8<'a> {
         }
 
         self.program_counter += Chip8::INSTRUCTION_SIZE;
+    }
+
+    #[cfg(all(feature = "compiletime-compat", not(feature = "variant-opcodes")))]
+    fn rdarray(&mut self, vx: usize) {
+        self._rdarray_standard(vx)
+    }
+
+    #[inline(always)]
+    #[cfg(all(feature = "compiletime-compat", feature = "variant-opcodes"))]
+    fn rdarray(&mut self, vx: usize) {
+        self._rdarray_schip(vx)
+    }
+
+    #[cfg(not(feature = "compiletime-compat"))]
+    fn rdarray(&mut self, vx: usize) {
+        if self._schip_compat {
+            self._rdarray_schip(vx)
+        } else {
+            self._rdarray_standard(vx)
+        }
     }
 }
 
