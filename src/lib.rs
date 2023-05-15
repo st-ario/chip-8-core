@@ -53,6 +53,7 @@ pub struct IOCallbacks<'a> {
     pub rng: &'a (dyn Fn() -> u8 + Send + Sync),      // generate random number
     pub wait_for_key: &'a (dyn Fn() -> u8 + Send + Sync), // suspend execution until any key is pressed, return key value
     pub is_pressed: &'a (dyn Fn(u8) -> bool + Send + Sync), // check the key corresponding to the argument
+    pub draw_signal: &'a (dyn Fn() + Send + Sync), // signal that a draw instruction has just been processed
 }
 
 pub struct Chip8<'a> {
@@ -543,6 +544,7 @@ impl<'a> Chip8<'a> {
             }
         }
 
+        (self.callbacks.draw_signal)();
         self.program_counter += Chip8::INSTRUCTION_SIZE;
     }
 
