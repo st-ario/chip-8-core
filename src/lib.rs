@@ -1,5 +1,5 @@
 mod framebuffer;
-pub use framebuffer::FrameBuffer;
+pub use framebuffer::{FrameBuffer, EMPTY_FRAMEBUFFER};
 use framebuffer::*;
 
 const RAM_SIZE: usize = 0xFFF;

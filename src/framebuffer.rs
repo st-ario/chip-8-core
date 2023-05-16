@@ -4,6 +4,8 @@ pub const SCREEN_WIDTH_IN_U8: usize = SCREEN_WIDTH / 8;
 pub type FrameBufferLayout = [[u8; SCREEN_WIDTH_IN_U8]; SCREEN_HEIGHT];
 pub type FrameBuffer = [u8; SCREEN_WIDTH_IN_U8 * SCREEN_HEIGHT];
 
+pub const EMPTY_FRAMEBUFFER: FrameBuffer = [0; SCREEN_WIDTH_IN_U8 * SCREEN_HEIGHT];
+
 #[derive(Clone, Default)]
 pub struct FrameBufferInternal {
     pub data: FrameBufferLayout,
