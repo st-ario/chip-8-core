@@ -452,7 +452,7 @@ impl<'a> Chip8<'a> {
             let left_chunk = sprite_chunk >> byte_offset;
 
             let mut valid_right_chunk: bool = false;
-            let mut right_idx: Option<usize> = None;
+            let mut right_idx: usize = usize::MAX;
 
             /* manage horizontal wraparound/clipping */
             {
@@ -508,9 +508,9 @@ impl<'a> Chip8<'a> {
 
             // update right chunk
             let any_flip_right;
-            if let (Some(rc), Some(ridx)) = (right_chunk, right_idx) {
-                any_flip_right = self.framebuffer.data[current_row][ridx] & rc != 0;
-                self.framebuffer.data[current_row][ridx] ^= rc;
+            if let Some(rc) = right_chunk {
+                any_flip_right = self.framebuffer.data[current_row][right_idx] & rc != 0;
+                self.framebuffer.data[current_row][right_idx] ^= rc;
             } else {
                 any_flip_right = false;
             };
@@ -731,20 +731,20 @@ impl<'a> Chip8<'a> {
 #[inline(always)]
 fn _clipping(
     valid_right_chunk: &mut bool,
-    right_idx: &mut Option<usize>,
+    right_idx: &mut usize,
     left_idx: usize,
     byte_offset: usize,
 ) {
     // there is a right chunk only if the left chunk is offset
     // moreover, if the right chunk would fall off the screen, it's just ignored
     *valid_right_chunk = byte_offset != 0 && left_idx < SCREEN_WIDTH_IN_U8 - 1;
-    *right_idx = Some(left_idx + 1);
+    *right_idx = left_idx + 1;
 }
 
 #[inline(always)]
 fn _wrapping(
     valid_right_chunk: &mut bool,
-    right_idx: &mut Option<usize>,
+    right_idx: &mut usize,
     left_idx: usize,
     byte_offset: usize,
 ) {
@@ -752,8 +752,8 @@ fn _wrapping(
     *valid_right_chunk = byte_offset != 0;
 
     *right_idx = if left_idx == SCREEN_WIDTH_IN_U8 - 1 {
-        None
+        0
     } else {
-        Some(left_idx + 1)
+        left_idx + 1
     };
 }
